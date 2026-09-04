@@ -12,6 +12,7 @@
 
 #define MAXLINE 1024
 #define PORT 5349
+#define HEADER_SIZE 12
 
 struct dns_hf {
   bool qr;
@@ -34,14 +35,24 @@ struct dns_h {
 };
 
 struct dns_q {
-  uint16_t qname;
+  char *qname;
   uint16_t qtype;
   uint16_t qclass;
+  int length;
+};
+
+enum ans_type {
+  A = 1
 };
 
 uint16_t read_offset(const unsigned char *buffer, size_t offset) {
   return ((static_cast<uint16_t>(buffer[offset]) << 8) |
           (static_cast<uint16_t>(buffer[offset + 1])));
+}
+
+void update_qr_to_response(unsigned char *buffer) {
+  buffer[2] = buffer[2] | 0b10000000;
+  buffer[3] = 0x0000;
 }
 
 struct dns_h parse_headers(const unsigned char *buffer) {
@@ -72,6 +83,8 @@ struct dns_h parse_headers(const unsigned char *buffer) {
   std::cout << "RA:     " << std::bitset<1>(ra).to_string().c_str() << '\n';
   std::cout << "Z:      " << std::bitset<3>(z).to_string().c_str() << '\n';
   std::cout << "RCODE:  " << std::bitset<4>(rcode).to_string().c_str() << '\n';
+  std::cout << "QDCOUNT:  " << std::bitset<16>(qdcount).to_string().c_str()
+            << '\n';
 
   struct dns_hf dns_flags;
   dns_flags.qr = qr;
@@ -97,22 +110,22 @@ struct dns_h parse_headers(const unsigned char *buffer) {
 struct dns_q parse_dnsq(const unsigned char *buffer) {
   char domain[1024];
   int b2read;
-  b2read = static_cast<int>(buffer[12]);
+  b2read = static_cast<int>(buffer[HEADER_SIZE]);
 
   int i = 1;
   int idx = 0;
   while (true) {
     if (i <= b2read) {
-      char b = static_cast<char>(buffer[12 + idx + 1]);
+      char b = static_cast<char>(buffer[HEADER_SIZE + idx + 1]);
       domain[idx] = b;
     }
     i++;
     idx++;
     if (i > b2read) {
-      b2read = static_cast<int>(buffer[12 + idx + 1]);
-      if(b2read == 0){
-          domain[idx] = '\0';
-          break;
+      b2read = static_cast<int>(buffer[HEADER_SIZE + idx + 1]);
+      if (b2read == 0) {
+        domain[idx] = '\0';
+        break;
       }
       domain[idx] = '.';
       idx++;
@@ -120,22 +133,55 @@ struct dns_q parse_dnsq(const unsigned char *buffer) {
     }
   }
 
-  std::cout << "domain name: " << domain << std::endl;
+  std::cout << "(bytes: " << idx + 1 << " ) domain name: " << domain
+            << std::endl;
 
-  uint16_t qtype = read_offset(buffer, 14);
-  uint16_t qclass = read_offset(buffer, 16);
+  uint16_t qtype = read_offset(buffer, HEADER_SIZE + idx + 2);
 
   struct dns_q dnsq;
-  // dnsq.qname = qname;
-  // dnsq.qclass = qclass;
-  // dnsq.qtype = qtype;
+  dnsq.qname = domain;
+  dnsq.qtype = qtype;
+  uint16_t qclass = read_offset(buffer, HEADER_SIZE + idx + 4);
 
-  // std::cout << "QNAME:  " << std::bitset<16>(qname).to_string().c_str() <<
-  // '\n'; std::cout << "QCLASS:  " <<
-  // std::bitset<16>(qclass).to_string().c_str() << '\n'; std::cout << "QTYPE:
-  // " << std::bitset<16>(qtype).to_string().c_str() << '\n';
+  dnsq.qclass = qclass;
 
+  std::cout << "qclass:  " << std::bitset<16>(dnsq.qclass) << '\n';
+  std::cout << "qtype:" << std::bitset<16>(dnsq.qtype).to_string().c_str()
+            << '\n';
+
+  dnsq.length = idx + 5;
   return dnsq;
+}
+
+void set_ans_name_pointer(unsigned char *buffer, int *pos){
+    buffer[++*pos] = 0b11000000;
+    buffer[++*pos] = 0xC;
+}
+
+void set_ans_type(unsigned char *buffer, int *pos, enum ans_type type){
+    *pos += 2;
+    buffer[*pos] = type;
+}
+
+void set_default_ans_class(unsigned char *buffer, int* pos){
+    *pos += 2;
+    buffer[*pos] = 0x1;
+}
+
+void set_ans_ttl(unsigned char *buffer, int* pos, uint32_t ttl){
+
+}
+
+void attach_answer(unsigned char *buffer, int qn_len) {
+    int curr_pos = HEADER_SIZE + qn_len;
+    set_ans_name_pointer(buffer, &curr_pos);
+
+
+    std::cout << "name in answer :" << std::bitset<16>( static_cast<uint16_t>(buffer[curr_pos] << 8) | static_cast<uint16_t>(buffer[curr_pos+1])).to_string().c_str()<< '\n';
+
+    set_ans_type(buffer, &curr_pos, ans_type::A);
+    set_default_ans_class(buffer, &curr_pos);
+    set_ans_ttl(buffer, &curr_pos, 300);
 }
 
 int main() {
@@ -179,7 +225,9 @@ int main() {
     std::cout << "Received " << n << " bytes\n";
 
     parse_headers(buffer);
-    parse_dnsq(buffer);
+    dns_q question = parse_dnsq(buffer);
+    update_qr_to_response(buffer);
+    attach_answer(buffer, question.length);
 
     printf("\n");
     memset(&buffer, 0, MAXLINE);
