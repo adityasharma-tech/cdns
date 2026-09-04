@@ -55,6 +55,11 @@ void update_qr_to_response(unsigned char *buffer) {
   buffer[3] = 0x0000;
 }
 
+void update_ancount(unsigned char *buffer){
+    uint16_t ancount = 1;
+    std::memcpy(buffer+7, &ancount, sizeof(uint16_t));
+}
+
 struct dns_h parse_headers(const unsigned char *buffer) {
   uint16_t id = read_offset(buffer, 0);
   uint16_t flags = read_offset(buffer, 2);
@@ -149,39 +154,64 @@ struct dns_q parse_dnsq(const unsigned char *buffer) {
   std::cout << "qtype:" << std::bitset<16>(dnsq.qtype).to_string().c_str()
             << '\n';
 
-  dnsq.length = idx + 5;
+  dnsq.length = idx + 6;
   return dnsq;
 }
 
 void set_ans_name_pointer(unsigned char *buffer, int *pos){
-    buffer[++*pos] = 0b11000000;
-    buffer[++*pos] = 0xC;
+    buffer[++(*pos)] = 0b11000000;
+    buffer[++(*pos)] = 0xC;
 }
 
 void set_ans_type(unsigned char *buffer, int *pos, enum ans_type type){
-    *pos += 2;
-    buffer[*pos] = type;
+    uint16_t _type = htons(type);
+    memcpy(buffer+(*pos)+1, &_type, sizeof(uint16_t));
 }
 
 void set_default_ans_class(unsigned char *buffer, int* pos){
-    *pos += 2;
-    buffer[*pos] = 0x1;
+    (*pos) += 2; // 15
+    buffer[*pos] = 0x1; //15
 }
 
 void set_ans_ttl(unsigned char *buffer, int* pos, uint32_t ttl){
-
+    (*pos)++; // 16
+    std::memcpy(buffer+(*pos), &ttl, sizeof(uint32_t)); // 16,17,18,19
+    (*pos)+=3;
 }
 
-void attach_answer(unsigned char *buffer, int qn_len) {
-    int curr_pos = HEADER_SIZE + qn_len;
-    set_ans_name_pointer(buffer, &curr_pos);
+void set_ans_rdlen(unsigned char *buffer, int* pos, uint16_t rdlen){
+    (*pos)++; // 20
+    std::memcpy(buffer+(*pos), &rdlen, sizeof(uint16_t));
+    (*pos)+= 1;
+}
 
+void write_ans_rdata(unsigned char *buffer, int* pos, enum ans_type type){
+    if(type == ans_type::A){
+        buffer[++(*pos)] = 1;
+        buffer[++(*pos)] = 1;
+        buffer[++(*pos)] = 1;
+        buffer[++(*pos)] = 1;
+    } else {
+        perror("we dont have support for this QUESTION TYPE");
+        exit(EXIT_FAILURE);
+    }
+}
+
+int attach_answer(unsigned char *buffer, int qn_len) {
+    int curr_pos = HEADER_SIZE + qn_len;
+    update_ancount(buffer);
+    set_ans_name_pointer(buffer, &curr_pos);
 
     std::cout << "name in answer :" << std::bitset<16>( static_cast<uint16_t>(buffer[curr_pos] << 8) | static_cast<uint16_t>(buffer[curr_pos+1])).to_string().c_str()<< '\n';
 
     set_ans_type(buffer, &curr_pos, ans_type::A);
     set_default_ans_class(buffer, &curr_pos);
     set_ans_ttl(buffer, &curr_pos, 300);
+    set_ans_rdlen(buffer, &curr_pos, 4);
+
+    char rdata[4];
+    write_ans_rdata(buffer, &curr_pos, ans_type::A);
+    return curr_pos;
 }
 
 int main() {
@@ -227,7 +257,15 @@ int main() {
     parse_headers(buffer);
     dns_q question = parse_dnsq(buffer);
     update_qr_to_response(buffer);
-    attach_answer(buffer, question.length);
+    int buff_size = attach_answer(buffer, question.length);
+
+    int sn = sendto(sockfd, buffer, buff_size, 0, (const struct sockaddr *)&clientaddr, sizeof(clientaddr));
+
+    if(n < 0){
+        perror("sendto failed");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
 
     printf("\n");
     memset(&buffer, 0, MAXLINE);
