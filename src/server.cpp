@@ -88,7 +88,7 @@ struct dns_h parse_headers(const unsigned char *buffer) {
   std::cout << "RA:     " << std::bitset<1>(ra).to_string().c_str() << '\n';
   std::cout << "Z:      " << std::bitset<3>(z).to_string().c_str() << '\n';
   std::cout << "RCODE:  " << std::bitset<4>(rcode).to_string().c_str() << '\n';
-  std::cout << "QDCOUNT:  " << std::bitset<16>(qdcount).to_string().c_str()
+  std::cout << "QDCOUNT:" << std::bitset<16>(qdcount).to_string().c_str()
             << '\n';
 
   struct dns_hf dns_flags;
@@ -130,6 +130,7 @@ struct dns_q parse_dnsq(const unsigned char *buffer) {
       b2read = static_cast<int>(buffer[HEADER_SIZE + idx + 1]);
       if (b2read == 0) {
         domain[idx] = '\0';
+        idx++;
         break;
       }
       domain[idx] = '.';
@@ -146,48 +147,50 @@ struct dns_q parse_dnsq(const unsigned char *buffer) {
   struct dns_q dnsq;
   dnsq.qname = domain;
   dnsq.qtype = qtype;
-  uint16_t qclass = read_offset(buffer, HEADER_SIZE + idx + 4);
 
+  uint16_t qclass = read_offset(buffer, HEADER_SIZE + idx + 4);
   dnsq.qclass = qclass;
 
-  std::cout << "qclass:  " << std::bitset<16>(dnsq.qclass) << '\n';
-  std::cout << "qtype:" << std::bitset<16>(dnsq.qtype).to_string().c_str()
-            << '\n';
+  dnsq.length = idx + 1 +  4;
 
-  dnsq.length = idx + 6;
+  std::cout << "len(QUESTION): " << idx+1 << std::endl;
+  std::cout << "len(question section): " << dnsq.length << std::endl;
   return dnsq;
 }
 
 void set_ans_name_pointer(unsigned char *buffer, int *pos){
-    buffer[++(*pos)] = 0b11000000;
+    buffer[(*pos)] = 0b11000000;
     buffer[++(*pos)] = 0xC;
 }
 
 void set_ans_type(unsigned char *buffer, int *pos, enum ans_type type){
     uint16_t _type = htons(type);
     memcpy(buffer+(*pos)+1, &_type, sizeof(uint16_t));
+    (*pos)++;
 }
 
 void set_default_ans_class(unsigned char *buffer, int* pos){
-    (*pos) += 2; // 15
-    buffer[*pos] = 0x1; //15
+    uint16_t _class = htons(0x1);
+    (*pos) += 2;
+    memcpy(buffer+(*pos), &_class, sizeof(uint16_t));
+    (*pos) += 2;
 }
 
 void set_ans_ttl(unsigned char *buffer, int* pos, uint32_t ttl){
-    (*pos)++; // 16
-    std::memcpy(buffer+(*pos), &ttl, sizeof(uint32_t)); // 16,17,18,19
-    (*pos)+=3;
+    uint32_t _ttl = htonl(ttl);
+    std::memcpy(buffer+(*pos), &_ttl, sizeof(uint32_t));
+    (*pos)+=4;
 }
 
 void set_ans_rdlen(unsigned char *buffer, int* pos, uint16_t rdlen){
-    (*pos)++; // 20
-    std::memcpy(buffer+(*pos), &rdlen, sizeof(uint16_t));
-    (*pos)+= 1;
+    uint16_t _rdlen = htons(rdlen);
+    std::memcpy(buffer+(*pos), &_rdlen, sizeof(uint16_t));
+    (*pos)+= 2;
 }
 
 void write_ans_rdata(unsigned char *buffer, int* pos, enum ans_type type){
     if(type == ans_type::A){
-        buffer[++(*pos)] = 1;
+        buffer[(*pos)] = 1;
         buffer[++(*pos)] = 1;
         buffer[++(*pos)] = 1;
         buffer[++(*pos)] = 1;
@@ -195,6 +198,7 @@ void write_ans_rdata(unsigned char *buffer, int* pos, enum ans_type type){
         perror("we dont have support for this QUESTION TYPE");
         exit(EXIT_FAILURE);
     }
+    (*pos) += 1;
 }
 
 int attach_answer(unsigned char *buffer, int qn_len) {
@@ -207,10 +211,9 @@ int attach_answer(unsigned char *buffer, int qn_len) {
     set_ans_type(buffer, &curr_pos, ans_type::A);
     set_default_ans_class(buffer, &curr_pos);
     set_ans_ttl(buffer, &curr_pos, 300);
-    set_ans_rdlen(buffer, &curr_pos, 4);
-
-    char rdata[4];
+    set_ans_rdlen(buffer, &curr_pos, 0x4);
     write_ans_rdata(buffer, &curr_pos, ans_type::A);
+
     return curr_pos;
 }
 
@@ -255,8 +258,8 @@ int main() {
     std::cout << "Received " << n << " bytes\n";
 
     parse_headers(buffer);
-    dns_q question = parse_dnsq(buffer);
-    update_qr_to_response(buffer);
+    dns_q question = parse_dnsq(buffer); //
+    update_qr_to_response(buffer); // 200
     int buff_size = attach_answer(buffer, question.length);
 
     int sn = sendto(sockfd, buffer, buff_size, 0, (const struct sockaddr *)&clientaddr, sizeof(clientaddr));
